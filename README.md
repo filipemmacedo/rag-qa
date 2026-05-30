@@ -1,6 +1,6 @@
 # RAG Playground
 
-Built by **Filipe Macedo** as a hands-on way to explore RAG internals: chunk sizes, overlap, retrieval strategies, evaluation metrics. And to share that learning with anyone else who wants to dig into how RAG actually works under the hood.
+Built as a hands-on way to explore RAG internals: chunk sizes, overlap, retrieval strategies, evaluation metrics. And to share that learning with anyone else who wants to dig into how RAG actually works under the hood.
 
 If you're here to learn, experiment, or just break things to see what happens: welcome.
 
