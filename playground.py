@@ -12,6 +12,8 @@ from dotenv import load_dotenv
 from openai import OpenAI
 from pypdf import PdfReader
 
+from core.logs import LogEntry, append_log, make_entry, update_last_log_scores
+
 
 # -----------------------------
 # Config
@@ -20,10 +22,44 @@ load_dotenv()
 EMBEDDING_MODEL = "text-embedding-3-small"
 ANSWER_MODEL = "gpt-4.1-mini"
 JUDGE_MODEL = "gpt-4.1"  # stronger + different from answerer to reduce self-preference bias
+RERANK_MODEL = "rerank-v3.5"
 CHROMA_PATH = "./chroma_db"
 COLLECTION_NAME = "rag_documents"
+STATE_PATH = "./rag_state.json"
 
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"), max_retries=3)
+
+
+# -----------------------------
+# Disk state cache
+# -----------------------------
+_PERSIST_KEYS = ["last_question", "last_answer", "last_latency", "last_results", "manual_eval_result", "eval_set", "last_rerank", "last_rerank_candidates"]
+
+
+def load_disk_state() -> dict:
+    if not os.path.exists(STATE_PATH):
+        return {}
+    try:
+        with open(STATE_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def save_disk_state():
+    data = {}
+    for key in _PERSIST_KEYS:
+        if key in st.session_state:
+            data[key] = st.session_state[key]
+    if "eval_results" in st.session_state:
+        data["eval_results"] = st.session_state["eval_results"].to_dict("records")
+    with open(STATE_PATH, "w", encoding="utf-8") as f:
+        json.dump(data, f)
+
+
+def clear_disk_state():
+    if os.path.exists(STATE_PATH):
+        os.remove(STATE_PATH)
 
 
 def get_collection():
@@ -98,6 +134,23 @@ def retrieve(collection, question: str, top_k: int):
         n_results=top_k,
         include=["documents", "metadatas", "distances"],
     )
+
+
+def rerank_results(question: str, results: dict, top_k: int) -> dict:
+    api_key = os.getenv("COHERE_API_KEY")
+    if not api_key:
+        raise ValueError("COHERE_API_KEY not set in .env")
+    import cohere
+    co = cohere.ClientV2(api_key=api_key)
+    docs = results["documents"][0]
+    response = co.rerank(model=RERANK_MODEL, query=question, documents=docs, top_n=top_k)
+    indices = [r.index for r in response.results]
+    return {
+        "ids": [[results["ids"][0][i] for i in indices]],
+        "documents": [[results["documents"][0][i] for i in indices]],
+        "metadatas": [[results["metadatas"][0][i] for i in indices]],
+        "distances": [[results["distances"][0][i] for i in indices]],
+    }
 
 
 def answer_question(question: str, results) -> str:
@@ -246,6 +299,15 @@ st.caption("Upload documents, index them, ask questions, and inspect retrieval q
 
 collection = get_collection()
 
+if "disk_state_loaded" not in st.session_state:
+    cached = load_disk_state()
+    for key in _PERSIST_KEYS:
+        if key in cached:
+            st.session_state[key] = cached[key]
+    if "eval_results" in cached:
+        st.session_state["eval_results"] = pd.DataFrame(cached["eval_results"])
+    st.session_state["disk_state_loaded"] = True
+
 if "last_index_message" in st.session_state:
     st.success(st.session_state.pop("last_index_message"))
 
@@ -257,9 +319,26 @@ with st.sidebar:
     top_k = st.slider("Top K chunks", 1, 10, 4)
 
     st.divider()
+    st.subheader("Reranking")
+    use_rerank = st.checkbox("Enable reranking (Cohere)", value=False)
+    rerank_candidates = top_k
+    if use_rerank:
+        rerank_candidates = st.slider(
+            "Candidates to fetch before reranking",
+            min_value=top_k, max_value=50,
+            value=max(top_k * 3, 20), step=5,
+            help="Retrieve this many chunks from the vector store, then rerank down to Top K.",
+        )
+        if not os.getenv("COHERE_API_KEY"):
+            st.warning("COHERE_API_KEY not set in .env — reranking will fail.")
+
+    st.divider()
     if st.button("Clear vector database"):
         st.session_state.chroma_client.delete_collection(COLLECTION_NAME)
         st.session_state.pop("collection", None)
+        for key in _PERSIST_KEYS + ["eval_results", "disk_state_loaded"]:
+            st.session_state.pop(key, None)
+        clear_disk_state()
         st.success("Vector database cleared.")
         st.rerun()
 
@@ -310,10 +389,21 @@ if question:
         st.error("No chunks indexed yet. Upload a document first.")
         st.stop()
 
-    # Only re-run retrieval if the question changed
-    if st.session_state.get("last_question") != question:
+    cache_stale = (
+        st.session_state.get("last_question") != question
+        or st.session_state.get("last_rerank") != use_rerank
+        or st.session_state.get("last_rerank_candidates") != rerank_candidates
+    )
+    if cache_stale:
         start_time = time.time()
-        results = retrieve(collection, question, top_k=top_k)
+        results = retrieve(collection, question, top_k=rerank_candidates)
+        if use_rerank:
+            with st.spinner("Reranking..."):
+                try:
+                    results = rerank_results(question, results, top_k)
+                except Exception as e:
+                    st.error(f"Reranking failed: {e}")
+                    st.stop()
         answer = answer_question(question, results)
         latency = time.time() - start_time
 
@@ -321,7 +411,11 @@ if question:
         st.session_state["last_results"] = results
         st.session_state["last_answer"] = answer
         st.session_state["last_latency"] = latency
-        st.session_state.pop("manual_eval_result", None)  # reset previous eval
+        st.session_state["last_rerank"] = use_rerank
+        st.session_state["last_rerank_candidates"] = rerank_candidates
+        st.session_state.pop("manual_eval_result", None)
+        save_disk_state()
+        append_log(make_entry(question, answer, chunk_size, overlap, top_k, latency, use_rerank, rerank_candidates, results))
 
     results = st.session_state["last_results"]
     answer = st.session_state["last_answer"]
@@ -331,10 +425,11 @@ if question:
     st.write(answer)
 
     st.markdown("### Basic stats")
-    col1, col2, col3 = st.columns(3)
+    col1, col2, col3, col4 = st.columns(4)
     col1.metric("Top K", top_k)
     col2.metric("Latency", f"{latency:.2f}s")
     col3.metric("Retrieved chunks", len(results["documents"][0]))
+    col4.metric("Reranking", "ON" if st.session_state.get("last_rerank") else "OFF")
 
     st.markdown("### Retrieved context")
     for i, doc in enumerate(results["documents"][0]):
@@ -358,6 +453,8 @@ if question:
             with st.spinner("Judging..."):
                 scores = judge_answer(question, expected, answer, retrieved_context)
             st.session_state["manual_eval_result"] = scores
+            save_disk_state()
+            update_last_log_scores(question, scores)
 
     if "manual_eval_result" in st.session_state:
         scores = st.session_state["manual_eval_result"]
@@ -378,6 +475,7 @@ if st.button("Generate eval set from documents"):
     else:
         with st.spinner("Generating eval questions..."):
             st.session_state["eval_set"] = generate_eval_set(collection, num_eval_questions)
+        save_disk_state()
         st.success(f"Generated {len(st.session_state['eval_set'])} eval questions.")
 
 if "eval_set" in st.session_state:
@@ -393,7 +491,12 @@ if "eval_set" in st.session_state:
                 gold_id = item.get("gold_chunk_id")
 
                 start_time = time.time()
-                results = retrieve(collection, q, top_k=top_k)
+                results = retrieve(collection, q, top_k=rerank_candidates)
+                if use_rerank:
+                    try:
+                        results = rerank_results(q, results, top_k)
+                    except Exception as e:
+                        st.warning(f"Reranking failed for question '{q}': {e}")
                 actual = answer_question(q, results)
                 latency = time.time() - start_time
 
@@ -417,6 +520,7 @@ if "eval_set" in st.session_state:
             })
 
         st.session_state["eval_results"] = pd.DataFrame(rows)
+        save_disk_state()
 
 if "eval_results" in st.session_state:
     st.markdown("### Evaluation results")
@@ -430,6 +534,3 @@ if "eval_results" in st.session_state:
     col3.metric("Correctness", round(df["correctness"].mean(), 2))
     col4.metric("Faithfulness", round(df["faithfulness"].mean(), 2))
     col5.metric("Retrieval quality", round(df["retrieval_quality"].mean(), 2))
-
-
-    # python -m streamlit run playground.py

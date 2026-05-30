@@ -1,5 +1,7 @@
 .venv/
 .env
 chroma_db/
+rag_state.json
+rag_logs.jsonl
 __pycache__/
 *.pyc
