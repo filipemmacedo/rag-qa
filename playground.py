@@ -27,7 +27,12 @@ CHROMA_PATH = "./chroma_db"
 COLLECTION_NAME = "rag_documents"
 STATE_PATH = "./rag_state.json"
 
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"), max_retries=3)
+def get_client() -> OpenAI:
+    api_key = st.session_state.get("openai_key_input") or os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        st.error("No OpenAI API key found. Add it in the sidebar or set OPENAI_API_KEY in your environment.")
+        st.stop()
+    return OpenAI(api_key=api_key, max_retries=3)
 
 
 # -----------------------------
@@ -107,7 +112,7 @@ def chunk_text(text: str, chunk_size: int, overlap: int) -> list[str]:
 
 
 def embed_texts(texts: list[str]) -> list[list[float]]:
-    response = client.embeddings.create(model=EMBEDDING_MODEL, input=texts)
+    response = get_client().embeddings.create(model=EMBEDDING_MODEL, input=texts)
     return [item.embedding for item in response.data]
 
 
@@ -177,7 +182,7 @@ Question:
 {question}
 """.strip()
 
-    response = client.responses.create(model=ANSWER_MODEL, input=prompt)
+    response = get_client().responses.create(model=ANSWER_MODEL, input=prompt)
     return response.output_text
 
 
@@ -226,7 +231,7 @@ Chunk:
 """.strip()
 
         try:
-            response = client.responses.create(model=ANSWER_MODEL, input=prompt)
+            response = get_client().responses.create(model=ANSWER_MODEL, input=prompt)
             item = safe_json_loads(response.output_text)
         except Exception as e:
             st.warning(f"Eval generation failed for chunk {meta.get('chunk_index', '?')}: {e}")
@@ -274,7 +279,7 @@ JSON format:
 """.strip()
 
     try:
-        response = client.responses.create(model=JUDGE_MODEL, input=prompt)
+        response = get_client().responses.create(model=JUDGE_MODEL, input=prompt)
         item = safe_json_loads(response.output_text)
     except Exception as e:
         return {
@@ -321,9 +326,6 @@ with st.sidebar:
         "Cohere API Key", type="password",
         key="cohere_key_input", placeholder="Uses .env if empty",
     )
-    if ui_openai_key:
-        client = OpenAI(api_key=ui_openai_key, max_retries=3)
-
     st.divider()
     st.header("Settings")
     st.metric("Chunks in vector DB", collection.count())
