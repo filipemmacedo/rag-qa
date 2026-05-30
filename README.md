@@ -134,6 +134,8 @@ Every run is recorded. Change a setting, ask the same question, evaluate it, the
 **7. Understand the judge model**
 The judge (GPT-4.1) is deliberately different and stronger than the answer model (GPT-4.1-mini). Try swapping `JUDGE_MODEL` to the same model as `ANSWER_MODEL` in `playground.py`. You'll likely see inflated scores because a model grading itself tends to be generous. This is called self-preference bias and it's a real problem in LLM evaluation.
 
+![Logs table Latency ascending](image-1.png)
+
 ## Project structure
 
 ```
