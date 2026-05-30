@@ -137,9 +137,9 @@ def retrieve(collection, question: str, top_k: int):
 
 
 def rerank_results(question: str, results: dict, top_k: int) -> dict:
-    api_key = os.getenv("COHERE_API_KEY")
+    api_key = st.session_state.get("cohere_key_input") or os.getenv("COHERE_API_KEY")
     if not api_key:
-        raise ValueError("COHERE_API_KEY not set in .env")
+        raise ValueError("No Cohere API key found. Add it in the sidebar or in .env.")
     import cohere
     co = cohere.ClientV2(api_key=api_key)
     docs = results["documents"][0]
@@ -312,6 +312,19 @@ if "last_index_message" in st.session_state:
     st.success(st.session_state.pop("last_index_message"))
 
 with st.sidebar:
+    st.header("API Keys")
+    ui_openai_key = st.text_input(
+        "OpenAI API Key", type="password",
+        key="openai_key_input", placeholder="Uses .env if empty",
+    )
+    ui_cohere_key = st.text_input(
+        "Cohere API Key", type="password",
+        key="cohere_key_input", placeholder="Uses .env if empty",
+    )
+    if ui_openai_key:
+        client = OpenAI(api_key=ui_openai_key, max_retries=3)
+
+    st.divider()
     st.header("Settings")
     st.metric("Chunks in vector DB", collection.count())
     chunk_size = st.slider("Chunk size", 300, 2000, 800, step=100)
@@ -329,8 +342,9 @@ with st.sidebar:
             value=max(top_k * 3, 20), step=5,
             help="Retrieve this many chunks from the vector store, then rerank down to Top K.",
         )
-        if not os.getenv("COHERE_API_KEY"):
-            st.warning("COHERE_API_KEY not set in .env — reranking will fail.")
+        resolved_cohere = ui_cohere_key or os.getenv("COHERE_API_KEY")
+        if not resolved_cohere:
+            st.warning("No Cohere API key found — add it above or in .env.")
 
     st.divider()
     if st.button("Clear vector database"):
