@@ -1,1 +1,0 @@
-API Guard is a reverse proxy for LLMs. It controls budgets, rate limits, policies, and security checks.
